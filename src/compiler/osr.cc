@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/ast/scopes.h"
 #include "src/compiler.h"
 #include "src/compiler/all-nodes.h"
 #include "src/compiler/common-operator.h"
@@ -17,7 +18,6 @@
 #include "src/compiler/node.h"
 #include "src/compiler/node-marker.h"
 #include "src/compiler/osr.h"
-#include "src/scopes.h"
 
 namespace v8 {
 namespace internal {
@@ -99,7 +99,7 @@ static void PeelOuterLoopsForOsr(Graph* graph, CommonOperatorBuilder* common,
       }
       copy = graph->NewNode(orig->op(), orig->InputCount(), &tmp_inputs[0]);
       if (NodeProperties::IsTyped(orig)) {
-        NodeProperties::SetBounds(copy, NodeProperties::GetBounds(orig));
+        NodeProperties::SetType(copy, NodeProperties::GetType(orig));
       }
       mapping->at(orig->id()) = copy;
       TRACE(" copy #%d:%s -> #%d\n", orig->id(), orig->op()->mnemonic(),
@@ -237,7 +237,7 @@ static void PeelOuterLoopsForOsr(Graph* graph, CommonOperatorBuilder* common,
     NodeId const id = end->InputAt(i)->id();
     for (NodeVector* const copy : copies) {
       end->AppendInput(graph->zone(), copy->at(id));
-      end->set_op(common->End(end->InputCount()));
+      NodeProperties::ChangeOp(end, common->End(end->InputCount()));
     }
   }
 
@@ -245,40 +245,6 @@ static void PeelOuterLoopsForOsr(Graph* graph, CommonOperatorBuilder* common,
     OFStream os(stdout);
     os << "-- Graph after OSR duplication -- " << std::endl;
     os << AsRPO(*graph);
-  }
-}
-
-
-static void TransferOsrValueTypesFromLoopPhis(Zone* zone, Node* osr_loop_entry,
-                                              Node* osr_loop) {
-  // Find the index of the osr loop entry into the loop.
-  int index = 0;
-  for (index = 0; index < osr_loop->InputCount(); index++) {
-    if (osr_loop->InputAt(index) == osr_loop_entry) break;
-  }
-  if (index == osr_loop->InputCount()) return;
-
-  for (Node* osr_value : osr_loop_entry->uses()) {
-    if (osr_value->opcode() != IrOpcode::kOsrValue) continue;
-    bool unknown = true;
-    for (Node* phi : osr_value->uses()) {
-      if (phi->opcode() != IrOpcode::kPhi) continue;
-      if (NodeProperties::GetControlInput(phi) != osr_loop) continue;
-      if (phi->InputAt(index) != osr_value) continue;
-      if (NodeProperties::IsTyped(phi)) {
-        // Transfer the type from the phi to the OSR value itself.
-        Bounds phi_bounds = NodeProperties::GetBounds(phi);
-        if (unknown) {
-          NodeProperties::SetBounds(osr_value, phi_bounds);
-        } else {
-          Bounds osr_bounds = NodeProperties::GetBounds(osr_value);
-          NodeProperties::SetBounds(osr_value,
-                                    Bounds::Both(phi_bounds, osr_bounds, zone));
-        }
-        unknown = false;
-      }
-    }
-    if (unknown) NodeProperties::SetBounds(osr_value, Bounds::Unbounded(zone));
   }
 }
 
@@ -313,9 +279,6 @@ void OsrHelper::Deconstruct(JSGraph* jsgraph, CommonOperatorBuilder* common,
 
   CHECK(osr_loop);  // Should have found the OSR loop.
 
-  // Transfer the types from loop phis to the OSR values which flow into them.
-  TransferOsrValueTypesFromLoopPhis(graph->zone(), osr_loop_entry, osr_loop);
-
   // Analyze the graph to determine how deeply nested the OSR loop is.
   LoopTree* loop_tree = LoopFinder::BuildLoopTree(graph, tmp_zone);
 
@@ -338,12 +301,14 @@ void OsrHelper::Deconstruct(JSGraph* jsgraph, CommonOperatorBuilder* common,
   CHECK_NE(0, live_input_count);
   for (Node* const use : osr_loop->uses()) {
     if (NodeProperties::IsPhi(use)) {
-      use->set_op(common->ResizeMergeOrPhi(use->op(), live_input_count));
       use->RemoveInput(0);
+      NodeProperties::ChangeOp(
+          use, common->ResizeMergeOrPhi(use->op(), live_input_count));
     }
   }
-  osr_loop->set_op(common->ResizeMergeOrPhi(osr_loop->op(), live_input_count));
   osr_loop->RemoveInput(0);
+  NodeProperties::ChangeOp(
+      osr_loop, common->ResizeMergeOrPhi(osr_loop->op(), live_input_count));
 
   // Run control reduction and graph trimming.
   // TODO(bmeurer): The OSR deconstruction could be a regular reducer and play
@@ -365,8 +330,6 @@ void OsrHelper::SetupFrame(Frame* frame) {
   // The optimized frame will subsume the unoptimized frame. Do so by reserving
   // the first spill slots.
   frame->ReserveSpillSlots(UnoptimizedFrameSlots());
-  // The frame needs to be adjusted by the number of unoptimized frame slots.
-  frame->SetOsrStackSlotCount(static_cast<int>(UnoptimizedFrameSlots()));
 }
 
 }  // namespace compiler

@@ -13,8 +13,9 @@
 #include "src/compiler/osr.h"
 #include "test/cctest/cctest.h"
 
-using namespace v8::internal;
-using namespace v8::internal::compiler;
+namespace v8 {
+namespace internal {
+namespace compiler {
 
 // TODO(titzer): move this method to a common testing place.
 
@@ -48,7 +49,7 @@ class OsrDeconstructorTester : public HandleAndZoneScope {
       : isolate(main_isolate()),
         common(main_zone()),
         graph(main_zone()),
-        jsgraph(main_isolate(), &graph, &common, NULL, NULL),
+        jsgraph(main_isolate(), &graph, &common, nullptr, nullptr, nullptr),
         start(graph.NewNode(common.Start(1))),
         p0(graph.NewNode(common.Parameter(0), start)),
         end(graph.NewNode(common.End(1), start)),
@@ -90,25 +91,20 @@ class OsrDeconstructorTester : public HandleAndZoneScope {
     if (count > 3) inputs[3] = back2;
     if (count > 4) inputs[4] = back3;
     inputs[count] = loop;
-    return graph.NewNode(common.Phi(kMachAnyTagged, count), count + 1, inputs);
+    return graph.NewNode(common.Phi(MachineRepresentation::kTagged, count),
+                         count + 1, inputs);
   }
 
-  Node* NewLoop(bool is_osr, int num_backedges, Node* entry = NULL) {
-    CHECK_LT(num_backedges, 4);
-    CHECK_GE(num_backedges, 0);
-    int count = 1 + num_backedges;
-    if (entry == NULL) entry = osr_normal_entry;
-    Node* inputs[5] = {entry, self, self, self, self};
+  Node* NewLoop(bool is_osr, int num_backedges, Node* entry = nullptr) {
+    if (entry == nullptr) entry = osr_normal_entry;
+    Node* loop = graph.NewNode(common.Loop(1), entry);
     if (is_osr) {
-      count = 2 + num_backedges;
-      inputs[1] = osr_loop_entry;
+      loop->AppendInput(graph.zone(), osr_loop_entry);
     }
-
-    Node* loop = graph.NewNode(common.Loop(count), count, inputs);
-    for (int i = 0; i < loop->InputCount(); i++) {
-      if (loop->InputAt(i) == self) loop->ReplaceInput(i, loop);
+    for (int i = 0; i < num_backedges; i++) {
+      loop->AppendInput(graph.zone(), loop);
     }
-
+    NodeProperties::ChangeOp(loop, common.Loop(loop->InputCount()));
     return loop;
   }
 
@@ -158,30 +154,6 @@ TEST(Deconstruct_osr1) {
   T.graph.SetEnd(ret);
 
   T.DeconstructOsr();
-
-  CheckInputs(loop, T.start, loop);
-  CheckInputs(osr_phi, T.osr_values[0], T.jsgraph.ZeroConstant(), loop);
-  CheckInputs(ret, osr_phi, T.start, loop);
-}
-
-
-TEST(Deconstruct_osr1_type) {
-  OsrDeconstructorTester T(1);
-
-  Node* loop = T.NewOsrLoop(1);
-  Node* osr_phi =
-      T.NewOsrPhi(loop, T.jsgraph.OneConstant(), 0, T.jsgraph.ZeroConstant());
-  Type* type = Type::Signed32();
-  NodeProperties::SetBounds(osr_phi, Bounds(type, type));
-
-  Node* ret = T.graph.NewNode(T.common.Return(), osr_phi, T.start, loop);
-  T.graph.SetEnd(ret);
-
-  OsrHelper helper(0, 0);
-  helper.Deconstruct(&T.jsgraph, &T.common, T.main_zone());
-
-  CHECK_EQ(type, NodeProperties::GetBounds(T.osr_values[0]).lower);
-  CHECK_EQ(type, NodeProperties::GetBounds(T.osr_values[0]).upper);
 
   CheckInputs(loop, T.start, loop);
   CheckInputs(osr_phi, T.osr_values[0], T.jsgraph.ZeroConstant(), loop);
@@ -343,9 +315,11 @@ struct While {
 
   Node* Phi(Node* i1, Node* i2, Node* i3) {
     if (loop->InputCount() == 2) {
-      return t.graph.NewNode(t.common.Phi(kMachAnyTagged, 2), i1, i2, loop);
+      return t.graph.NewNode(t.common.Phi(MachineRepresentation::kTagged, 2),
+                             i1, i2, loop);
     } else {
-      return t.graph.NewNode(t.common.Phi(kMachAnyTagged, 3), i1, i2, i3, loop);
+      return t.graph.NewNode(t.common.Phi(MachineRepresentation::kTagged, 3),
+                             i1, i2, i3, loop);
     }
   }
 };
@@ -502,7 +476,8 @@ Node* MakeCounter(JSGraph* jsgraph, Node* start, Node* loop) {
   tmp_inputs.push_back(loop);
 
   Node* phi = jsgraph->graph()->NewNode(
-      jsgraph->common()->Phi(kMachInt32, count), count + 1, &tmp_inputs[0]);
+      jsgraph->common()->Phi(MachineRepresentation::kWord32, count), count + 1,
+      &tmp_inputs[0]);
   Node* inc = jsgraph->graph()->NewNode(&kIntAdd, phi, jsgraph->OneConstant());
 
   for (int i = 1; i < count; i++) {
@@ -521,10 +496,10 @@ TEST(Deconstruct_osr_nested3) {
   loop0.branch->ReplaceInput(0, loop0_cntr);
 
   // middle loop.
-  Node* loop1 = T.graph.NewNode(T.common.Loop(2), loop0.if_true, T.self);
-  loop1->ReplaceInput(0, loop0.if_true);
-  Node* loop1_phi = T.graph.NewNode(T.common.Phi(kMachAnyTagged, 2), loop0_cntr,
-                                    loop0_cntr, loop1);
+  Node* loop1 = T.graph.NewNode(T.common.Loop(1), loop0.if_true);
+  Node* loop1_phi =
+      T.graph.NewNode(T.common.Phi(MachineRepresentation::kTagged, 2),
+                      loop0_cntr, loop0_cntr, loop1);
 
   // innermost (OSR) loop.
   While loop2(T, T.p0, true, 1);
@@ -545,7 +520,8 @@ TEST(Deconstruct_osr_nested3) {
   Node* if_false = T.graph.NewNode(T.common.IfFalse(), branch);
 
   loop0.loop->ReplaceInput(1, if_true);
-  loop1->ReplaceInput(1, if_false);
+  loop1->AppendInput(T.graph.zone(), if_false);
+  NodeProperties::ChangeOp(loop1, T.common.Loop(2));
 
   Node* ret =
       T.graph.NewNode(T.common.Return(), loop0_cntr, T.start, loop0.exit);
@@ -593,3 +569,7 @@ TEST(Deconstruct_osr_nested3) {
   // depends on the copy of the outer loop0.
   CheckInputs(new_ret, new_loop0_phi, T.graph.start(), new_loop0_exit);
 }
+
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8

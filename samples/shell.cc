@@ -45,8 +45,9 @@
 
 
 v8::Local<v8::Context> CreateShellContext(v8::Isolate* isolate);
-void RunShell(v8::Local<v8::Context> context);
-int RunMain(v8::Isolate* isolate, int argc, char* argv[]);
+void RunShell(v8::Local<v8::Context> context, v8::Platform* platform);
+int RunMain(v8::Isolate* isolate, v8::Platform* platform, int argc,
+            char* argv[]);
 bool ExecuteString(v8::Isolate* isolate, v8::Local<v8::String> source,
                    v8::Local<v8::Value> name, bool print_result,
                    bool report_exceptions);
@@ -62,26 +63,16 @@ void ReportException(v8::Isolate* isolate, v8::TryCatch* handler);
 static bool run_shell;
 
 
-class ShellArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
- public:
-  virtual void* Allocate(size_t length) {
-    void* data = AllocateUninitialized(length);
-    return data == NULL ? data : memset(data, 0, length);
-  }
-  virtual void* AllocateUninitialized(size_t length) { return malloc(length); }
-  virtual void Free(void* data, size_t) { free(data); }
-};
-
-
 int main(int argc, char* argv[]) {
-  v8::V8::InitializeICU();
+  v8::V8::InitializeICUDefaultLocation(argv[0]);
+  v8::V8::InitializeExternalStartupData(argv[0]);
   v8::Platform* platform = v8::platform::CreateDefaultPlatform();
   v8::V8::InitializePlatform(platform);
   v8::V8::Initialize();
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
-  ShellArrayBufferAllocator array_buffer_allocator;
   v8::Isolate::CreateParams create_params;
-  create_params.array_buffer_allocator = &array_buffer_allocator;
+  create_params.array_buffer_allocator =
+      v8::ArrayBuffer::Allocator::NewDefaultAllocator();
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   run_shell = (argc == 1);
   int result;
@@ -94,13 +85,14 @@ int main(int argc, char* argv[]) {
       return 1;
     }
     v8::Context::Scope context_scope(context);
-    result = RunMain(isolate, argc, argv);
-    if (run_shell) RunShell(context);
+    result = RunMain(isolate, platform, argc, argv);
+    if (run_shell) RunShell(context, platform);
   }
   isolate->Dispose();
   v8::V8::Dispose();
   v8::V8::ShutdownPlatform();
   delete platform;
+  delete create_params.array_buffer_allocator;
   return result;
 }
 
@@ -269,7 +261,8 @@ v8::MaybeLocal<v8::String> ReadFile(v8::Isolate* isolate, const char* name) {
 
 
 // Process remaining command line arguments and execute files
-int RunMain(v8::Isolate* isolate, int argc, char* argv[]) {
+int RunMain(v8::Isolate* isolate, v8::Platform* platform, int argc,
+            char* argv[]) {
   for (int i = 1; i < argc; i++) {
     const char* str = argv[i];
     if (strcmp(str, "--shell") == 0) {
@@ -292,7 +285,9 @@ int RunMain(v8::Isolate* isolate, int argc, char* argv[]) {
                .ToLocal(&source)) {
         return 1;
       }
-      if (!ExecuteString(isolate, source, file_name, false, true)) return 1;
+      bool success = ExecuteString(isolate, source, file_name, false, true);
+      while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
+      if (!success) return 1;
     } else {
       // Use all other arguments as names of files to load and run.
       v8::Local<v8::String> file_name =
@@ -303,7 +298,9 @@ int RunMain(v8::Isolate* isolate, int argc, char* argv[]) {
         fprintf(stderr, "Error reading '%s'\n", str);
         continue;
       }
-      if (!ExecuteString(isolate, source, file_name, false, true)) return 1;
+      bool success = ExecuteString(isolate, source, file_name, false, true);
+      while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
+      if (!success) return 1;
     }
   }
   return 0;
@@ -311,7 +308,7 @@ int RunMain(v8::Isolate* isolate, int argc, char* argv[]) {
 
 
 // The read-eval-execute loop of the shell.
-void RunShell(v8::Local<v8::Context> context) {
+void RunShell(v8::Local<v8::Context> context, v8::Platform* platform) {
   fprintf(stderr, "V8 version %s [sample shell]\n", v8::V8::GetVersion());
   static const int kBufferSize = 256;
   // Enter the execution environment before evaluating any code.
@@ -330,6 +327,8 @@ void RunShell(v8::Local<v8::Context> context) {
         v8::String::NewFromUtf8(context->GetIsolate(), str,
                                 v8::NewStringType::kNormal).ToLocalChecked(),
         name, true, true);
+    while (v8::platform::PumpMessageLoop(platform, context->GetIsolate()))
+      continue;
   }
   fprintf(stderr, "\n");
 }
@@ -403,9 +402,11 @@ void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch) {
       fprintf(stderr, "^");
     }
     fprintf(stderr, "\n");
-    v8::String::Utf8Value stack_trace(
-        try_catch->StackTrace(context).ToLocalChecked());
-    if (stack_trace.length() > 0) {
+    v8::Local<v8::Value> stack_trace_string;
+    if (try_catch->StackTrace(context).ToLocal(&stack_trace_string) &&
+        stack_trace_string->IsString() &&
+        v8::Local<v8::String>::Cast(stack_trace_string)->Length() > 0) {
+      v8::String::Utf8Value stack_trace(stack_trace_string);
       const char* stack_trace_string = ToCString(stack_trace);
       fprintf(stderr, "%s\n", stack_trace_string);
     }

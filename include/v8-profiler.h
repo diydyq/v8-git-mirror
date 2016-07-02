@@ -6,7 +6,7 @@
 #define V8_V8_PROFILER_H_
 
 #include <vector>
-#include "v8.h"
+#include "v8.h"  // NOLINT(build/include)
 
 /**
  * Profiler support for the V8 JavaScript engine.
@@ -60,13 +60,13 @@ class V8_EXPORT CpuProfileNode {
   };
 
   /** Returns function name (empty string for anonymous functions.) */
-  Handle<String> GetFunctionName() const;
+  Local<String> GetFunctionName() const;
 
   /** Returns id of the script where function is located. */
   int GetScriptId() const;
 
   /** Returns resource name for script from where the function originates. */
-  Handle<String> GetScriptResourceName() const;
+  Local<String> GetScriptResourceName() const;
 
   /**
    * Returns the number, 1-based, of the line where the function originates.
@@ -129,7 +129,7 @@ class V8_EXPORT CpuProfileNode {
 class V8_EXPORT CpuProfile {
  public:
   /** Returns CPU profile title. */
-  Handle<String> GetTitle() const;
+  Local<String> GetTitle() const;
 
   /** Returns the root node of the top down call tree. */
   const CpuProfileNode* GetTopDownRoot() const;
@@ -198,13 +198,20 @@ class V8_EXPORT CpuProfiler {
    * |record_samples| parameter controls whether individual samples should
    * be recorded in addition to the aggregated tree.
    */
-  void StartProfiling(Handle<String> title, bool record_samples = false);
+  void StartProfiling(Local<String> title, bool record_samples = false);
 
   /**
    * Stops collecting CPU profile with a given title and returns it.
    * If the title given is empty, finishes the last profile started.
    */
-  CpuProfile* StopProfiling(Handle<String> title);
+  CpuProfile* StopProfiling(Local<String> title);
+
+  /**
+   * Force collection of a sample. Must be called on the VM thread.
+   * Recording the forced sample does not contribute to the aggregated
+   * profile statistics.
+   */
+  void CollectSample();
 
   /**
    * Tells the profiler whether the embedder is idle.
@@ -246,7 +253,7 @@ class V8_EXPORT HeapGraphEdge {
    * Returns edge name. This can be a variable name, an element index, or
    * a property name.
    */
-  Handle<Value> GetName() const;
+  Local<Value> GetName() const;
 
   /** Returns origin node. */
   const HeapGraphNode* GetFromNode() const;
@@ -287,7 +294,7 @@ class V8_EXPORT HeapGraphNode {
    * of the constructor (for objects), the name of the function (for
    * closures), string value, or an empty string (for compiled code).
    */
-  Handle<String> GetName() const;
+  Local<String> GetName() const;
 
   /**
    * Returns node id. For the same heap object, the id remains the same
@@ -419,19 +426,108 @@ class V8_EXPORT ActivityControl {  // NOLINT
 
 
 /**
+ * AllocationProfile is a sampled profile of allocations done by the program.
+ * This is structured as a call-graph.
+ */
+class V8_EXPORT AllocationProfile {
+ public:
+  struct Allocation {
+    /**
+     * Size of the sampled allocation object.
+     */
+    size_t size;
+
+    /**
+     * The number of objects of such size that were sampled.
+     */
+    unsigned int count;
+  };
+
+  /**
+   * Represents a node in the call-graph.
+   */
+  struct Node {
+    /**
+     * Name of the function. May be empty for anonymous functions or if the
+     * script corresponding to this function has been unloaded.
+     */
+    Local<String> name;
+
+    /**
+     * Name of the script containing the function. May be empty if the script
+     * name is not available, or if the script has been unloaded.
+     */
+    Local<String> script_name;
+
+    /**
+     * id of the script where the function is located. May be equal to
+     * v8::UnboundScript::kNoScriptId in cases where the script doesn't exist.
+     */
+    int script_id;
+
+    /**
+     * Start position of the function in the script.
+     */
+    int start_position;
+
+    /**
+     * 1-indexed line number where the function starts. May be
+     * kNoLineNumberInfo if no line number information is available.
+     */
+    int line_number;
+
+    /**
+     * 1-indexed column number where the function starts. May be
+     * kNoColumnNumberInfo if no line number information is available.
+     */
+    int column_number;
+
+    /**
+     * List of callees called from this node for which we have sampled
+     * allocations. The lifetime of the children is scoped to the containing
+     * AllocationProfile.
+     */
+    std::vector<Node*> children;
+
+    /**
+     * List of self allocations done by this node in the call-graph.
+     */
+    std::vector<Allocation> allocations;
+  };
+
+  /**
+   * Returns the root node of the call-graph. The root node corresponds to an
+   * empty JS call-stack. The lifetime of the returned Node* is scoped to the
+   * containing AllocationProfile.
+   */
+  virtual Node* GetRootNode() = 0;
+
+  virtual ~AllocationProfile() {}
+
+  static const int kNoLineNumberInfo = Message::kNoLineNumberInfo;
+  static const int kNoColumnNumberInfo = Message::kNoColumnInfo;
+};
+
+
+/**
  * Interface for controlling heap profiling. Instance of the
  * profiler can be retrieved using v8::Isolate::GetHeapProfiler.
  */
 class V8_EXPORT HeapProfiler {
  public:
+  enum SamplingFlags {
+    kSamplingNoFlags = 0,
+    kSamplingForceGC = 1 << 0,
+  };
+
   /**
    * Callback function invoked for obtaining RetainedObjectInfo for
    * the given JavaScript wrapper object. It is prohibited to enter V8
    * while the callback is running: only getters on the handle and
    * GetPointerFromInternalField on the objects are allowed.
    */
-  typedef RetainedObjectInfo* (*WrapperInfoCallback)
-      (uint16_t class_id, Handle<Value> wrapper);
+  typedef RetainedObjectInfo* (*WrapperInfoCallback)(uint16_t class_id,
+                                                     Local<Value> wrapper);
 
   /** Returns the number of snapshots taken. */
   int GetSnapshotCount();
@@ -443,13 +539,13 @@ class V8_EXPORT HeapProfiler {
    * Returns SnapshotObjectId for a heap object referenced by |value| if
    * it has been seen by the heap profiler, kUnknownObjectId otherwise.
    */
-  SnapshotObjectId GetObjectId(Handle<Value> value);
+  SnapshotObjectId GetObjectId(Local<Value> value);
 
   /**
    * Returns heap object with given SnapshotObjectId if the object is alive,
    * otherwise empty handle is returned.
    */
-  Handle<Value> FindObjectById(SnapshotObjectId id);
+  Local<Value> FindObjectById(SnapshotObjectId id);
 
   /**
    * Clears internal map from SnapshotObjectId to heap object. The new objects
@@ -474,7 +570,8 @@ class V8_EXPORT HeapProfiler {
      * Returns name to be used in the heap snapshot for given node. Returned
      * string must stay alive until snapshot collection is completed.
      */
-    virtual const char* GetName(Handle<Object> object) = 0;
+    virtual const char* GetName(Local<Object> object) = 0;
+
    protected:
     virtual ~ObjectNameResolver() {}
   };
@@ -521,6 +618,50 @@ class V8_EXPORT HeapProfiler {
   void StopTrackingHeapObjects();
 
   /**
+   * Starts gathering a sampling heap profile. A sampling heap profile is
+   * similar to tcmalloc's heap profiler and Go's mprof. It samples object
+   * allocations and builds an online 'sampling' heap profile. At any point in
+   * time, this profile is expected to be a representative sample of objects
+   * currently live in the system. Each sampled allocation includes the stack
+   * trace at the time of allocation, which makes this really useful for memory
+   * leak detection.
+   *
+   * This mechanism is intended to be cheap enough that it can be used in
+   * production with minimal performance overhead.
+   *
+   * Allocations are sampled using a randomized Poisson process. On average, one
+   * allocation will be sampled every |sample_interval| bytes allocated. The
+   * |stack_depth| parameter controls the maximum number of stack frames to be
+   * captured on each allocation.
+   *
+   * NOTE: This is a proof-of-concept at this point. Right now we only sample
+   * newspace allocations. Support for paged space allocation (e.g. pre-tenured
+   * objects, large objects, code objects, etc.) and native allocations
+   * doesn't exist yet, but is anticipated in the future.
+   *
+   * Objects allocated before the sampling is started will not be included in
+   * the profile.
+   *
+   * Returns false if a sampling heap profiler is already running.
+   */
+  bool StartSamplingHeapProfiler(uint64_t sample_interval = 512 * 1024,
+                                 int stack_depth = 16,
+                                 SamplingFlags flags = kSamplingNoFlags);
+
+  /**
+   * Stops the sampling heap profile and discards the current profile.
+   */
+  void StopSamplingHeapProfiler();
+
+  /**
+   * Returns the sampled profile of allocations allocated (and still live) since
+   * StartSamplingHeapProfiler was called. The ownership of the pointer is
+   * transfered to the caller. Returns nullptr if sampling heap profiler is not
+   * active.
+   */
+  AllocationProfile* GetAllocationProfile();
+
+  /**
    * Deletes all snapshots taken. All previously returned pointers to
    * snapshots and their contents become invalid after this call.
    */
@@ -553,7 +694,6 @@ class V8_EXPORT HeapProfiler {
   HeapProfiler& operator=(const HeapProfiler&);
 };
 
-
 /**
  * Interface for providing information about embedder's objects
  * held by global handles. This information is reported in two ways:
@@ -568,7 +708,7 @@ class V8_EXPORT HeapProfiler {
  *     were not previously reported via AddObjectGroup.
  *
  * Thus, if an embedder wants to provide information about native
- * objects for heap snapshots, he can do it in a GC prologue
+ * objects for heap snapshots, it can do it in a GC prologue
  * handler, and / or by assigning wrapper class ids in the following way:
  *
  *  1. Bind a callback to class id by calling SetWrapperClassInfoProvider.

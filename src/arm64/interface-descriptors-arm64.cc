@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/arm64/interface-descriptors-arm64.h"
 
 #if V8_TARGET_ARCH_ARM64
 
@@ -13,6 +13,14 @@ namespace internal {
 
 const Register CallInterfaceDescriptor::ContextRegister() { return cp; }
 
+void CallInterfaceDescriptor::DefaultInitializePlatformSpecific(
+    CallInterfaceDescriptorData* data, int register_parameter_count) {
+  const Register default_stub_registers[] = {x0, x1, x2, x3, x4};
+  CHECK_LE(static_cast<size_t>(register_parameter_count),
+           arraysize(default_stub_registers));
+  data->InitializePlatformSpecific(register_parameter_count,
+                                   default_stub_registers);
+}
 
 const Register LoadDescriptor::ReceiverRegister() { return x1; }
 const Register LoadDescriptor::NameRegister() { return x2; }
@@ -33,30 +41,23 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return x4; }
 const Register VectorStoreICDescriptor::VectorRegister() { return x3; }
 
 
+const Register VectorStoreTransitionDescriptor::SlotRegister() { return x4; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return x3; }
+const Register VectorStoreTransitionDescriptor::MapRegister() { return x5; }
+
+
 const Register StoreTransitionDescriptor::MapRegister() { return x3; }
 
 
-const Register ElementTransitionAndStoreDescriptor::MapRegister() { return x3; }
+const Register StoreGlobalViaContextDescriptor::SlotRegister() { return x2; }
+const Register StoreGlobalViaContextDescriptor::ValueRegister() { return x0; }
 
 
-const Register InstanceofDescriptor::left() {
-  // Object to check (instanceof lhs).
-  return x11;
-}
+const Register StringCompareDescriptor::LeftRegister() { return x1; }
+const Register StringCompareDescriptor::RightRegister() { return x0; }
 
-
-const Register InstanceofDescriptor::right() {
-  // Constructor function (instanceof rhs).
-  return x10;
-}
-
-
-const Register ArgumentsAccessReadDescriptor::index() { return x1; }
-const Register ArgumentsAccessReadDescriptor::parameter_count() { return x0; }
-
-
-const Register ApiGetterDescriptor::function_address() { return x2; }
-
+const Register ApiGetterDescriptor::HolderRegister() { return x0; }
+const Register ApiGetterDescriptor::CallbackRegister() { return x3; }
 
 const Register MathPowTaggedDescriptor::exponent() { return x11; }
 
@@ -83,22 +84,38 @@ void FastNewContextDescriptor::InitializePlatformSpecific(
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
-
-void ToNumberDescriptor::InitializePlatformSpecific(
+void FastNewObjectDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // x0: value
-  Register registers[] = {x0};
+  Register registers[] = {x1, x3};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+void FastNewRestParameterDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x1: function
+  Register registers[] = {x1};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
-void NumberToStringDescriptor::InitializePlatformSpecific(
+void FastNewSloppyArgumentsDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // x0: value
-  Register registers[] = {x0};
+  // x1: function
+  Register registers[] = {x1};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
+
+void FastNewStrictArgumentsDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x1: function
+  Register registers[] = {x1};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+// static
+const Register TypeConversionDescriptor::ArgumentRegister() { return x0; }
 
 void TypeofDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
@@ -107,9 +124,20 @@ void TypeofDescriptor::InitializePlatformSpecific(
 }
 
 
+void FastCloneRegExpDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x3: closure
+  // x2: object literal index
+  // x1: constant properties
+  // x0: object literal flags
+  Register registers[] = {x3, x2, x1, x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
 void FastCloneShallowArrayDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // x3: array literals array
+  // x3: closure
   // x2: array literal index
   // x1: constant elements
   Register registers[] = {x3, x2, x1};
@@ -119,7 +147,7 @@ void FastCloneShallowArrayDescriptor::InitializePlatformSpecific(
 
 void FastCloneShallowObjectDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // x3: object literals array
+  // x3: closure
   // x2: object literal index
   // x1: constant properties
   // x0: object literal flags
@@ -143,13 +171,6 @@ void CreateWeakCellDescriptor::InitializePlatformSpecific(
   // x3: call feedback slot
   // x1: tagged value to put in the weak cell
   Register registers[] = {x2, x3, x1};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-
-void StoreArrayLiteralElementDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  Register registers[] = {x3, x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
@@ -181,10 +202,41 @@ void CallConstructDescriptor::InitializePlatformSpecific(
   // x0 : number of arguments
   // x1 : the function to call
   // x2 : feedback vector
-  // x3 : slot in feedback vector (smi) (if r2 is not the megamorphic symbol)
+  // x3 : slot in feedback vector (Smi, for RecordCallTarget)
+  // x4 : new target (for IsSuperConstructorCall)
   // TODO(turbofan): So far we don't gather type feedback and hence skip the
   // slot parameter, but ArrayConstructStub needs the vector to be undefined.
-  Register registers[] = {x0, x1, x2};
+  Register registers[] = {x0, x1, x4, x2};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void CallTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x1: target
+  // x0: number of arguments
+  Register registers[] = {x1, x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ConstructStubDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x3: new target
+  // x1: target
+  // x0: number of arguments
+  // x2: allocation site or undefined
+  Register registers[] = {x1, x3, x0, x2};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void ConstructTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x3: new target
+  // x1: target
+  // x0: number of arguments
+  Register registers[] = {x1, x3, x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
@@ -213,63 +265,53 @@ void AllocateHeapNumberDescriptor::InitializePlatformSpecific(
   data->InitializePlatformSpecific(0, nullptr, nullptr);
 }
 
+#define SIMD128_ALLOC_DESC(TYPE, Type, type, lane_count, lane_type) \
+  void Allocate##Type##Descriptor::InitializePlatformSpecific(      \
+      CallInterfaceDescriptorData* data) {                          \
+    data->InitializePlatformSpecific(0, nullptr, nullptr);          \
+  }
+SIMD128_TYPES(SIMD128_ALLOC_DESC)
+#undef SIMD128_ALLOC_DESC
 
-void ArrayConstructorConstantArgCountDescriptor::InitializePlatformSpecific(
+void ArrayNoArgumentConstructorDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
+  // register state
   // x1: function
   // x2: allocation site with elements kind
   // x0: number of arguments to the constructor function
-  Register registers[] = {x1, x2};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
+  Register registers[] = {x1, x2, x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
 }
 
+void ArraySingleArgumentConstructorDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // register state
+  // x0: number of arguments
+  // x1: function
+  // x2: allocation site with elements kind
+  Register registers[] = {x1, x2, x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers, NULL);
+}
 
-void ArrayConstructorDescriptor::InitializePlatformSpecific(
+void ArrayNArgumentsConstructorDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // stack param count needs (constructor pointer, and single argument)
   Register registers[] = {x1, x2, x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
-
-void InternalArrayConstructorConstantArgCountDescriptor::
-    InitializePlatformSpecific(CallInterfaceDescriptorData* data) {
-  // x1: constructor function
-  // x0: number of arguments to the constructor function
-  Register registers[] = {x1};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-
-void InternalArrayConstructorDescriptor::InitializePlatformSpecific(
+void VarArgFunctionDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
-  // stack param count needs (constructor pointer, and single argument)
-  Register registers[] = {x1, x0};
+  // stack param count needs (arg count)
+  Register registers[] = {x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
-
 
 void CompareDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // x1: left operand
   // x0: right operand
   Register registers[] = {x1, x0};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-
-void CompareNilDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  // x0: value to compare
-  Register registers[] = {x0};
-  data->InitializePlatformSpecific(arraysize(registers), registers);
-}
-
-
-void ToBooleanDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  // x0: value
-  Register registers[] = {x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
@@ -292,6 +334,11 @@ void BinaryOpWithAllocationSiteDescriptor::InitializePlatformSpecific(
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
+void CountOpDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {x1};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
 
 void StringAddDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
@@ -348,6 +395,7 @@ void ArgumentAdaptorDescriptor::InitializePlatformSpecific(
 
   Register registers[] = {
       x1,  // JSFunction
+      x3,  // the new target
       x0,  // actual number of arguments
       x2,  // expected number of arguments
   };
@@ -355,25 +403,7 @@ void ArgumentAdaptorDescriptor::InitializePlatformSpecific(
                                    &default_descriptor);
 }
 
-
-void ApiFunctionDescriptor::InitializePlatformSpecific(
-    CallInterfaceDescriptorData* data) {
-  static PlatformInterfaceDescriptor default_descriptor =
-      PlatformInterfaceDescriptor(CAN_INLINE_TARGET_ADDRESS);
-
-  Register registers[] = {
-      x0,  // callee
-      x4,  // call_data
-      x2,  // holder
-      x1,  // api_function_address
-      x3,  // actual number of arguments
-  };
-  data->InitializePlatformSpecific(arraysize(registers), registers,
-                                   &default_descriptor);
-}
-
-
-void ApiAccessorDescriptor::InitializePlatformSpecific(
+void ApiCallbackDescriptorBase::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   static PlatformInterfaceDescriptor default_descriptor =
       PlatformInterfaceDescriptor(CAN_INLINE_TARGET_ADDRESS);
@@ -388,15 +418,55 @@ void ApiAccessorDescriptor::InitializePlatformSpecific(
                                    &default_descriptor);
 }
 
-
-void MathRoundVariantDescriptor::InitializePlatformSpecific(
+void InterpreterDispatchDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {
-      x1,  // math rounding function
-      x3,  // vector slot id
+      kInterpreterAccumulatorRegister, kInterpreterBytecodeOffsetRegister,
+      kInterpreterBytecodeArrayRegister, kInterpreterDispatchTableRegister};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+void InterpreterPushArgsAndCallDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,  // argument count (not including receiver)
+      x2,  // address of first argument
+      x1   // the target callable to be call
   };
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+void InterpreterPushArgsAndConstructDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,  // argument count (not including receiver)
+      x3,  // new target
+      x1,  // constructor to call
+      x2   // address of the first argument
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,   // argument count (argc)
+      x11,  // address of first argument (argv)
+      x1    // the runtime function to call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+void ResumeGeneratorDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,  // the value to pass to the generator
+      x1,  // the JSGeneratorObject to resume
+      x2   // the resume mode (tagged)
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
 }  // namespace internal
 }  // namespace v8
 

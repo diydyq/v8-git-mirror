@@ -5,17 +5,13 @@
 #ifndef V8_COMPILER_COMMON_OPERATOR_H_
 #define V8_COMPILER_COMMON_OPERATOR_H_
 
+#include "src/assembler.h"
 #include "src/compiler/frame-states.h"
-#include "src/compiler/machine-type.h"
-#include "src/unique.h"
+#include "src/machine-type.h"
+#include "src/zone-containers.h"
 
 namespace v8 {
 namespace internal {
-
-// Forward declarations.
-class ExternalReference;
-
-
 namespace compiler {
 
 // Forward declarations.
@@ -47,6 +43,16 @@ std::ostream& operator<<(std::ostream&, BranchHint);
 BranchHint BranchHintOf(const Operator* const);
 
 
+// Deoptimize bailout kind.
+enum class DeoptimizeKind : uint8_t { kEager, kSoft };
+
+size_t hash_value(DeoptimizeKind kind);
+
+std::ostream& operator<<(std::ostream&, DeoptimizeKind);
+
+DeoptimizeKind DeoptimizeKindOf(const Operator* const);
+
+
 // Prediction whether throw-site is surrounded by any local catch-scope.
 enum class IfExceptionHint { kLocallyUncaught, kLocallyCaught };
 
@@ -57,15 +63,15 @@ std::ostream& operator<<(std::ostream&, IfExceptionHint);
 
 class SelectParameters final {
  public:
-  explicit SelectParameters(MachineType type,
+  explicit SelectParameters(MachineRepresentation representation,
                             BranchHint hint = BranchHint::kNone)
-      : type_(type), hint_(hint) {}
+      : representation_(representation), hint_(hint) {}
 
-  MachineType type() const { return type_; }
+  MachineRepresentation representation() const { return representation_; }
   BranchHint hint() const { return hint_; }
 
  private:
-  const MachineType type_;
+  const MachineRepresentation representation_;
   const BranchHint hint_;
 };
 
@@ -78,8 +84,11 @@ std::ostream& operator<<(std::ostream&, SelectParameters const& p);
 
 SelectParameters const& SelectParametersOf(const Operator* const);
 
+CallDescriptor const* CallDescriptorOf(const Operator* const);
 
 size_t ProjectionIndexOf(const Operator* const);
+
+MachineRepresentation PhiRepresentationOf(const Operator* const);
 
 
 // The {IrOpcode::kParameter} opcode represents an incoming parameter to the
@@ -102,6 +111,47 @@ std::ostream& operator<<(std::ostream&, ParameterInfo const&);
 int ParameterIndexOf(const Operator* const);
 const ParameterInfo& ParameterInfoOf(const Operator* const);
 
+class RelocatablePtrConstantInfo final {
+ public:
+  enum Type { kInt32, kInt64 };
+
+  RelocatablePtrConstantInfo(int32_t value, RelocInfo::Mode rmode)
+      : value_(value), rmode_(rmode), type_(kInt32) {}
+  RelocatablePtrConstantInfo(int64_t value, RelocInfo::Mode rmode)
+      : value_(value), rmode_(rmode), type_(kInt64) {}
+
+  intptr_t value() const { return value_; }
+  RelocInfo::Mode rmode() const { return rmode_; }
+  Type type() const { return type_; }
+
+ private:
+  intptr_t value_;
+  RelocInfo::Mode rmode_;
+  Type type_;
+};
+
+bool operator==(RelocatablePtrConstantInfo const& lhs,
+                RelocatablePtrConstantInfo const& rhs);
+bool operator!=(RelocatablePtrConstantInfo const& lhs,
+                RelocatablePtrConstantInfo const& rhs);
+
+std::ostream& operator<<(std::ostream&, RelocatablePtrConstantInfo const&);
+
+size_t hash_value(RelocatablePtrConstantInfo const& p);
+
+// Used to mark a region (as identified by BeginRegion/FinishRegion) as either
+// JavaScript-observable or not (i.e. allocations are not JavaScript observable
+// themselves, but transitioning stores are).
+enum class RegionObservability : uint8_t { kObservable, kNotObservable };
+
+size_t hash_value(RegionObservability);
+
+std::ostream& operator<<(std::ostream&, RegionObservability);
+
+RegionObservability RegionObservabilityOf(Operator const*) WARN_UNUSED_RESULT;
+
+std::ostream& operator<<(std::ostream& os,
+                         const ZoneVector<MachineType>* types);
 
 // Interface for building common operators that can be used at any level of IR,
 // including JavaScript, mid-level, and low-level.
@@ -120,11 +170,13 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* IfValue(int32_t value);
   const Operator* IfDefault();
   const Operator* Throw();
-  const Operator* Deoptimize();
-  const Operator* Return();
+  const Operator* Deoptimize(DeoptimizeKind kind);
+  const Operator* DeoptimizeIf();
+  const Operator* DeoptimizeUnless();
+  const Operator* Return(int value_input_count = 1);
   const Operator* Terminate();
 
-  const Operator* Start(int num_formal_parameters);
+  const Operator* Start(int value_output_count);
   const Operator* Loop(int control_input_count);
   const Operator* Merge(int control_input_count);
   const Operator* Parameter(int index, const char* debug_name = nullptr);
@@ -139,15 +191,22 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* Float64Constant(volatile double);
   const Operator* ExternalConstant(const ExternalReference&);
   const Operator* NumberConstant(volatile double);
-  const Operator* HeapConstant(const Unique<HeapObject>&);
+  const Operator* HeapConstant(const Handle<HeapObject>&);
 
-  const Operator* Select(MachineType, BranchHint = BranchHint::kNone);
-  const Operator* Phi(MachineType type, int value_input_count);
+  const Operator* RelocatableInt32Constant(int32_t value,
+                                           RelocInfo::Mode rmode);
+  const Operator* RelocatableInt64Constant(int64_t value,
+                                           RelocInfo::Mode rmode);
+
+  const Operator* Select(MachineRepresentation, BranchHint = BranchHint::kNone);
+  const Operator* Phi(MachineRepresentation representation,
+                      int value_input_count);
   const Operator* EffectPhi(int effect_input_count);
-  const Operator* EffectSet(int arguments);
-  const Operator* ValueEffect(int arguments);
-  const Operator* Finish(int arguments);
+  const Operator* Checkpoint();
+  const Operator* BeginRegion(RegionObservability);
+  const Operator* FinishRegion();
   const Operator* StateValues(int arguments);
+  const Operator* ObjectState(int pointer_slots, int id);
   const Operator* TypedStateValues(const ZoneVector<MachineType>* types);
   const Operator* FrameState(BailoutId bailout_id,
                              OutputFrameStateCombine state_combine,

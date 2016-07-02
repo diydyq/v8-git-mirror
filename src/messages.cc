@@ -2,30 +2,41 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/messages.h"
 
 #include "src/api.h"
 #include "src/execution.h"
-#include "src/heap/spaces-inl.h"
-#include "src/messages.h"
+#include "src/isolate-inl.h"
+#include "src/keys.h"
 #include "src/string-builder.h"
+#include "src/wasm/wasm-module.h"
 
 namespace v8 {
 namespace internal {
 
+MessageLocation::MessageLocation(Handle<Script> script, int start_pos,
+                                 int end_pos)
+    : script_(script), start_pos_(start_pos), end_pos_(end_pos) {}
+MessageLocation::MessageLocation(Handle<Script> script, int start_pos,
+                                 int end_pos, Handle<JSFunction> function)
+    : script_(script),
+      start_pos_(start_pos),
+      end_pos_(end_pos),
+      function_(function) {}
+MessageLocation::MessageLocation() : start_pos_(-1), end_pos_(-1) {}
 
 // If no message listeners have been registered this one is called
 // by default.
 void MessageHandler::DefaultMessageReport(Isolate* isolate,
                                           const MessageLocation* loc,
                                           Handle<Object> message_obj) {
-  SmartArrayPointer<char> str = GetLocalizedMessage(isolate, message_obj);
+  base::SmartArrayPointer<char> str = GetLocalizedMessage(isolate, message_obj);
   if (loc == NULL) {
     PrintF("%s\n", str.get());
   } else {
     HandleScope scope(isolate);
     Handle<Object> data(loc->script()->name(), isolate);
-    SmartArrayPointer<char> data_str;
+    base::SmartArrayPointer<char> data_str;
     if (data->IsString())
       data_str = Handle<String>::cast(data)->ToCString(DISALLOW_NULLS);
     PrintF("%s:%i: %s\n", data_str.get() ? data_str.get() : "<unknown>",
@@ -35,17 +46,20 @@ void MessageHandler::DefaultMessageReport(Isolate* isolate,
 
 
 Handle<JSMessageObject> MessageHandler::MakeMessageObject(
-    Isolate* isolate, MessageTemplate::Template message, MessageLocation* loc,
-    Handle<Object> argument, Handle<JSArray> stack_frames) {
+    Isolate* isolate, MessageTemplate::Template message,
+    MessageLocation* location, Handle<Object> argument,
+    Handle<JSArray> stack_frames) {
   Factory* factory = isolate->factory();
 
-  int start = 0;
-  int end = 0;
+  int start = -1;
+  int end = -1;
   Handle<Object> script_handle = factory->undefined_value();
-  if (loc) {
-    start = loc->start_pos();
-    end = loc->end_pos();
-    script_handle = Script::GetWrapper(loc->script());
+  if (location != NULL) {
+    start = location->start_pos();
+    end = location->end_pos();
+    script_handle = Script::GetWrapper(location->script());
+  } else {
+    script_handle = Script::GetWrapper(isolate->factory()->empty_script());
   }
 
   Handle<Object> stack_frames_handle = stack_frames.is_null()
@@ -80,11 +94,23 @@ void MessageHandler::ReportMessage(Isolate* isolate, MessageLocation* loc,
   if (message->argument()->IsJSObject()) {
     HandleScope scope(isolate);
     Handle<Object> argument(message->argument(), isolate);
-    Handle<Object> args[] = {argument};
-    MaybeHandle<Object> maybe_stringified = Execution::TryCall(
-        isolate->to_detail_string_fun(), isolate->js_builtins_object(),
-        arraysize(args), args);
+
+    MaybeHandle<Object> maybe_stringified;
     Handle<Object> stringified;
+    // Make sure we don't leak uncaught internally generated Error objects.
+    if (argument->IsJSError()) {
+      Handle<Object> args[] = {argument};
+      maybe_stringified = Execution::TryCall(
+          isolate, isolate->no_side_effects_to_string_fun(),
+          isolate->factory()->undefined_value(), arraysize(args), args);
+    } else {
+      v8::TryCatch catcher(reinterpret_cast<v8::Isolate*>(isolate));
+      catcher.SetVerbose(false);
+      catcher.SetCaptureMessage(false);
+
+      maybe_stringified = Object::ToString(isolate, argument);
+    }
+
     if (!maybe_stringified.ToHandle(&stringified)) {
       stringified = isolate->factory()->NewStringFromAsciiChecked("exception");
     }
@@ -104,7 +130,7 @@ void MessageHandler::ReportMessage(Isolate* isolate, MessageLocation* loc,
   } else {
     for (int i = 0; i < global_length; i++) {
       HandleScope scope(isolate);
-      if (global_listeners.get(i)->IsUndefined()) continue;
+      if (global_listeners.get(i)->IsUndefined(isolate)) continue;
       v8::NeanderObject listener(JSObject::cast(global_listeners.get(i)));
       Handle<Foreign> callback_obj(Foreign::cast(listener.get(0)));
       v8::MessageCallback callback =
@@ -113,7 +139,7 @@ void MessageHandler::ReportMessage(Isolate* isolate, MessageLocation* loc,
       {
         // Do not allow exceptions to propagate.
         v8::TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
-        callback(api_message_obj, callback_data->IsUndefined()
+        callback(api_message_obj, callback_data->IsUndefined(isolate)
                                       ? api_exception_obj
                                       : v8::Utils::ToLocal(callback_data));
       }
@@ -133,47 +159,76 @@ Handle<String> MessageHandler::GetMessage(Isolate* isolate,
 }
 
 
-SmartArrayPointer<char> MessageHandler::GetLocalizedMessage(
-    Isolate* isolate,
-    Handle<Object> data) {
+base::SmartArrayPointer<char> MessageHandler::GetLocalizedMessage(
+    Isolate* isolate, Handle<Object> data) {
   HandleScope scope(isolate);
   return GetMessage(isolate, data)->ToCString(DISALLOW_NULLS);
 }
 
 
-Handle<Object> CallSite::GetFileName(Isolate* isolate) {
-  Handle<Object> script(fun_->shared()->script(), isolate);
-  if (script->IsScript()) {
-    return Handle<Object>(Handle<Script>::cast(script)->name(), isolate);
+CallSite::CallSite(Isolate* isolate, Handle<JSObject> call_site_obj)
+    : isolate_(isolate) {
+  Handle<Object> maybe_function = JSObject::GetDataProperty(
+      call_site_obj, isolate->factory()->call_site_function_symbol());
+  if (maybe_function->IsJSFunction()) {
+    // javascript
+    fun_ = Handle<JSFunction>::cast(maybe_function);
+    receiver_ = JSObject::GetDataProperty(
+        call_site_obj, isolate->factory()->call_site_receiver_symbol());
+  } else {
+    Handle<Object> maybe_wasm_func_index = JSObject::GetDataProperty(
+        call_site_obj, isolate->factory()->call_site_wasm_func_index_symbol());
+    if (!maybe_wasm_func_index->IsSmi()) {
+      // invalid: neither javascript nor wasm
+      return;
+    }
+    // wasm
+    wasm_obj_ = Handle<JSObject>::cast(JSObject::GetDataProperty(
+        call_site_obj, isolate->factory()->call_site_wasm_obj_symbol()));
+    wasm_func_index_ = Smi::cast(*maybe_wasm_func_index)->value();
+    DCHECK(static_cast<int>(wasm_func_index_) >= 0);
   }
-  return isolate->factory()->null_value();
+
+  CHECK(JSObject::GetDataProperty(
+            call_site_obj, isolate->factory()->call_site_position_symbol())
+            ->ToInt32(&pos_));
 }
 
 
-Handle<Object> CallSite::GetFunctionName(Isolate* isolate) {
-  Handle<String> result = JSFunction::GetDebugName(fun_);
+Handle<Object> CallSite::GetFileName() {
+  if (!IsJavaScript()) return isolate_->factory()->null_value();
+  Object* script = fun_->shared()->script();
+  if (!script->IsScript()) return isolate_->factory()->null_value();
+  return Handle<Object>(Script::cast(script)->name(), isolate_);
+}
+
+
+Handle<Object> CallSite::GetFunctionName() {
+  if (IsWasm()) {
+    return wasm::GetWasmFunctionNameOrNull(isolate_, wasm_obj_,
+                                           wasm_func_index_);
+  }
+  Handle<String> result = JSFunction::GetName(fun_);
   if (result->length() != 0) return result;
-  Handle<Object> script(fun_->shared()->script(), isolate);
+
+  Handle<Object> script(fun_->shared()->script(), isolate_);
   if (script->IsScript() &&
       Handle<Script>::cast(script)->compilation_type() ==
           Script::COMPILATION_TYPE_EVAL) {
-    return isolate->factory()->eval_string();
+    return isolate_->factory()->eval_string();
   }
-  return isolate->factory()->null_value();
+  return isolate_->factory()->null_value();
 }
 
-
-Handle<Object> CallSite::GetScriptNameOrSourceUrl(Isolate* isolate) {
-  Handle<Object> script_obj(fun_->shared()->script(), isolate);
-  if (script_obj->IsScript()) {
-    Handle<Script> script = Handle<Script>::cast(script_obj);
-    Object* source_url = script->source_url();
-    if (source_url->IsString()) return Handle<Object>(source_url, isolate);
-    return Handle<Object>(script->name(), isolate);
-  }
-  return isolate->factory()->null_value();
+Handle<Object> CallSite::GetScriptNameOrSourceUrl() {
+  if (!IsJavaScript()) return isolate_->factory()->null_value();
+  Object* script_obj = fun_->shared()->script();
+  if (!script_obj->IsScript()) return isolate_->factory()->null_value();
+  Handle<Script> script(Script::cast(script_obj), isolate_);
+  Object* source_url = script->source_url();
+  if (source_url->IsString()) return Handle<Object>(source_url, isolate_);
+  return Handle<Object>(script->name(), isolate_);
 }
-
 
 bool CheckMethodName(Isolate* isolate, Handle<JSObject> obj, Handle<Name> name,
                      Handle<JSFunction> fun,
@@ -193,53 +248,66 @@ bool CheckMethodName(Isolate* isolate, Handle<JSObject> obj, Handle<Name> name,
 }
 
 
-Handle<Object> CallSite::GetMethodName(Isolate* isolate) {
-  MaybeHandle<JSReceiver> maybe = Object::ToObject(isolate, receiver_);
-  Handle<JSReceiver> receiver;
-  if (!maybe.ToHandle(&receiver) || !receiver->IsJSObject()) {
-    return isolate->factory()->null_value();
+Handle<Object> CallSite::GetMethodName() {
+  if (!IsJavaScript() || receiver_->IsNull(isolate_) ||
+      receiver_->IsUndefined(isolate_)) {
+    return isolate_->factory()->null_value();
+  }
+  Handle<JSReceiver> receiver =
+      Object::ToObject(isolate_, receiver_).ToHandleChecked();
+  if (!receiver->IsJSObject()) {
+    return isolate_->factory()->null_value();
   }
 
   Handle<JSObject> obj = Handle<JSObject>::cast(receiver);
-  Handle<Object> function_name(fun_->shared()->name(), isolate);
+  Handle<Object> function_name(fun_->shared()->name(), isolate_);
   if (function_name->IsName()) {
     Handle<Name> name = Handle<Name>::cast(function_name);
-    if (CheckMethodName(isolate, obj, name, fun_,
-                        LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR))
+    // ES2015 gives getters and setters name prefixes which must
+    // be stripped to find the property name.
+    Handle<String> name_string = Handle<String>::cast(name);
+    if (name_string->IsUtf8EqualTo(CStrVector("get "), true) ||
+        name_string->IsUtf8EqualTo(CStrVector("set "), true)) {
+      name = isolate_->factory()->NewProperSubString(name_string, 4,
+                                                     name_string->length());
+    }
+    if (CheckMethodName(isolate_, obj, name, fun_,
+                        LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR)) {
       return name;
+    }
   }
 
-  HandleScope outer_scope(isolate);
+  HandleScope outer_scope(isolate_);
   Handle<Object> result;
-  for (PrototypeIterator iter(isolate, obj,
-                              PrototypeIterator::START_AT_RECEIVER);
-       !iter.IsAtEnd(); iter.Advance()) {
+  for (PrototypeIterator iter(isolate_, obj, kStartAtReceiver); !iter.IsAtEnd();
+       iter.Advance()) {
     Handle<Object> current = PrototypeIterator::GetCurrent(iter);
     if (!current->IsJSObject()) break;
     Handle<JSObject> current_obj = Handle<JSObject>::cast(current);
     if (current_obj->IsAccessCheckNeeded()) break;
-    Handle<FixedArray> keys = JSObject::GetEnumPropertyKeys(current_obj, false);
+    Handle<FixedArray> keys =
+        KeyAccumulator::GetOwnEnumPropertyKeys(isolate_, current_obj);
     for (int i = 0; i < keys->length(); i++) {
-      HandleScope inner_scope(isolate);
+      HandleScope inner_scope(isolate_);
       if (!keys->get(i)->IsName()) continue;
-      Handle<Name> name_key(Name::cast(keys->get(i)), isolate);
-      if (!CheckMethodName(isolate, current_obj, name_key, fun_,
+      Handle<Name> name_key(Name::cast(keys->get(i)), isolate_);
+      if (!CheckMethodName(isolate_, current_obj, name_key, fun_,
                            LookupIterator::OWN_SKIP_INTERCEPTOR))
         continue;
       // Return null in case of duplicates to avoid confusion.
-      if (!result.is_null()) return isolate->factory()->null_value();
+      if (!result.is_null()) return isolate_->factory()->null_value();
       result = inner_scope.CloseAndEscape(name_key);
     }
   }
 
   if (!result.is_null()) return outer_scope.CloseAndEscape(result);
-  return isolate->factory()->null_value();
+  return isolate_->factory()->null_value();
 }
 
 
-int CallSite::GetLineNumber(Isolate* isolate) {
-  if (pos_ >= 0) {
-    Handle<Object> script_obj(fun_->shared()->script(), isolate);
+int CallSite::GetLineNumber() {
+  if (pos_ >= 0 && IsJavaScript()) {
+    Handle<Object> script_obj(fun_->shared()->script(), isolate_);
     if (script_obj->IsScript()) {
       Handle<Script> script = Handle<Script>::cast(script_obj);
       return Script::GetLineNumber(script, pos_) + 1;
@@ -249,9 +317,9 @@ int CallSite::GetLineNumber(Isolate* isolate) {
 }
 
 
-int CallSite::GetColumnNumber(Isolate* isolate) {
-  if (pos_ >= 0) {
-    Handle<Object> script_obj(fun_->shared()->script(), isolate);
+int CallSite::GetColumnNumber() {
+  if (pos_ >= 0 && IsJavaScript()) {
+    Handle<Object> script_obj(fun_->shared()->script(), isolate_);
     if (script_obj->IsScript()) {
       Handle<Script> script = Handle<Script>::cast(script_obj);
       return Script::GetColumnNumber(script, pos_) + 1;
@@ -261,32 +329,35 @@ int CallSite::GetColumnNumber(Isolate* isolate) {
 }
 
 
-bool CallSite::IsNative(Isolate* isolate) {
-  Handle<Object> script(fun_->shared()->script(), isolate);
+bool CallSite::IsNative() {
+  if (!IsJavaScript()) return false;
+  Handle<Object> script(fun_->shared()->script(), isolate_);
   return script->IsScript() &&
-         Handle<Script>::cast(script)->type()->value() == Script::TYPE_NATIVE;
+         Handle<Script>::cast(script)->type() == Script::TYPE_NATIVE;
 }
 
 
-bool CallSite::IsToplevel(Isolate* isolate) {
-  return receiver_->IsJSGlobalProxy() || receiver_->IsNull() ||
-         receiver_->IsUndefined();
+bool CallSite::IsToplevel() {
+  if (IsWasm()) return false;
+  return receiver_->IsJSGlobalProxy() || receiver_->IsNull(isolate_) ||
+         receiver_->IsUndefined(isolate_);
 }
 
 
-bool CallSite::IsEval(Isolate* isolate) {
-  Handle<Object> script(fun_->shared()->script(), isolate);
+bool CallSite::IsEval() {
+  if (!IsJavaScript()) return false;
+  Handle<Object> script(fun_->shared()->script(), isolate_);
   return script->IsScript() &&
          Handle<Script>::cast(script)->compilation_type() ==
              Script::COMPILATION_TYPE_EVAL;
 }
 
 
-bool CallSite::IsConstructor(Isolate* isolate) {
-  if (!receiver_->IsJSObject()) return false;
+bool CallSite::IsConstructor() {
+  if (!IsJavaScript() || !receiver_->IsJSObject()) return false;
   Handle<Object> constructor =
       JSReceiver::GetDataProperty(Handle<JSObject>::cast(receiver_),
-                                  isolate->factory()->constructor_string());
+                                  isolate_->factory()->constructor_string());
   return constructor.is_identical_to(fun_);
 }
 
@@ -299,14 +370,10 @@ Handle<String> MessageTemplate::FormatMessage(Isolate* isolate,
   if (arg->IsString()) {
     result_string = Handle<String>::cast(arg);
   } else {
-    Handle<String> fmt_str = factory->InternalizeOneByteString(
-        STATIC_CHAR_VECTOR("$noSideEffectToString"));
-    Handle<JSFunction> fun = Handle<JSFunction>::cast(
-        Object::GetProperty(isolate->js_builtins_object(), fmt_str)
-            .ToHandleChecked());
+    Handle<JSFunction> fun = isolate->no_side_effects_to_string_fun();
 
     MaybeHandle<Object> maybe_result =
-        Execution::TryCall(fun, isolate->js_builtins_object(), 1, &arg);
+        Execution::TryCall(isolate, fun, factory->undefined_value(), 1, &arg);
     Handle<Object> result;
     if (!maybe_result.ToHandle(&result) || !result->IsString()) {
       return factory->InternalizeOneByteString(STATIC_CHAR_VECTOR("<error>"));
@@ -328,24 +395,29 @@ Handle<String> MessageTemplate::FormatMessage(Isolate* isolate,
 }
 
 
-MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
-                                                   Handle<String> arg0,
-                                                   Handle<String> arg1,
-                                                   Handle<String> arg2) {
-  static const int kMaxArgLength = 256;
-  Isolate* isolate = arg0->GetIsolate();
-  const char* template_string;
+const char* MessageTemplate::TemplateString(int template_index) {
   switch (template_index) {
-#define CASE(NAME, STRING)    \
-  case k##NAME:               \
-    template_string = STRING; \
-    break;
+#define CASE(NAME, STRING) \
+  case k##NAME:            \
+    return STRING;
     MESSAGE_TEMPLATES(CASE)
 #undef CASE
     case kLastMessage:
     default:
-      isolate->ThrowIllegalOperation();
-      return MaybeHandle<String>();
+      return NULL;
+  }
+}
+
+
+MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
+                                                   Handle<String> arg0,
+                                                   Handle<String> arg1,
+                                                   Handle<String> arg2) {
+  Isolate* isolate = arg0->GetIsolate();
+  const char* template_string = TemplateString(template_index);
+  if (template_string == NULL) {
+    isolate->ThrowIllegalOperation();
+    return MaybeHandle<String>();
   }
 
   IncrementalStringBuilder builder(isolate);
@@ -361,16 +433,7 @@ MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
       } else {
         DCHECK(i < arraysize(args));
         Handle<String> arg = args[i++];
-        int length = arg->length();
-        if (length > kMaxArgLength) {
-          builder.AppendString(
-              isolate->factory()->NewSubString(arg, 0, kMaxArgLength - 6));
-          builder.AppendCString("...");
-          builder.AppendString(
-              isolate->factory()->NewSubString(arg, length - 3, length));
-        } else {
-          builder.AppendString(arg);
-        }
+        builder.AppendString(arg);
       }
     } else {
       builder.AppendCharacter(*c);
@@ -379,5 +442,7 @@ MaybeHandle<String> MessageTemplate::FormatMessage(int template_index,
 
   return builder.Finish();
 }
+
+
 }  // namespace internal
 }  // namespace v8

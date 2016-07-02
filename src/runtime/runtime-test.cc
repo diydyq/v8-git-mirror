@@ -2,21 +2,40 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
 #include "src/arguments.h"
 #include "src/deoptimizer.h"
-#include "src/full-codegen.h"
-#include "src/runtime/runtime-utils.h"
+#include "src/frames-inl.h"
+#include "src/full-codegen/full-codegen.h"
+#include "src/isolate-inl.h"
 #include "src/snapshot/natives.h"
 
 namespace v8 {
 namespace internal {
 
+RUNTIME_FUNCTION(Runtime_ConstructDouble) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 2);
+  CONVERT_NUMBER_CHECKED(uint32_t, hi, Uint32, args[0]);
+  CONVERT_NUMBER_CHECKED(uint32_t, lo, Uint32, args[1]);
+  uint64_t result = (static_cast<uint64_t>(hi) << 32) | lo;
+  return *isolate->factory()->NewNumber(uint64_to_double(result));
+}
+
 RUNTIME_FUNCTION(Runtime_DeoptimizeFunction) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
+
+  // This function is used by fuzzers to get coverage in compiler.
+  // Ignore calls on non-function objects to avoid runtime errors.
+  CONVERT_ARG_HANDLE_CHECKED(Object, function_object, 0);
+  // If it is not a JSFunction, just return.
+  if (!function_object->IsJSFunction()) {
+    return isolate->heap()->undefined_value();
+  }
+  Handle<JSFunction> function = Handle<JSFunction>::cast(function_object);
+
   if (!function->IsOptimized()) return isolate->heap()->undefined_value();
 
   // TODO(turbofan): Deoptimization is not supported yet.
@@ -84,7 +103,16 @@ RUNTIME_FUNCTION(Runtime_IsConcurrentRecompilationSupported) {
 RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
   HandleScope scope(isolate);
   RUNTIME_ASSERT(args.length() == 1 || args.length() == 2);
-  CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
+
+  // This function is used by fuzzers to get coverage for optimizations
+  // in compiler. Ignore calls on non-function objects to avoid runtime errors.
+  CONVERT_ARG_HANDLE_CHECKED(Object, function_object, 0);
+  // If it is not a JSFunction, just return.
+  if (!function_object->IsJSFunction()) {
+    return isolate->heap()->undefined_value();
+  }
+  Handle<JSFunction> function = Handle<JSFunction>::cast(function_object);
+
   // The following assertion was lifted from the DCHECK inside
   // JSFunction::MarkForOptimization().
   RUNTIME_ASSERT(function->shared()->allows_lazy_compilation() ||
@@ -135,6 +163,12 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   RUNTIME_ASSERT(function->shared()->allows_lazy_compilation() ||
                  !function->shared()->optimization_disabled());
 
+  // If function is interpreted, just return. OSR is not supported.
+  // TODO(4764): Remove this check when OSR is enabled in the interpreter.
+  if (function->shared()->HasBytecodeArray()) {
+    return isolate->heap()->undefined_value();
+  }
+
   // If the function is already optimized, just return.
   if (function->IsOptimized()) return isolate->heap()->undefined_value();
 
@@ -153,7 +187,8 @@ RUNTIME_FUNCTION(Runtime_NeverOptimizeFunction) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_CHECKED(JSFunction, function, 0);
-  function->shared()->set_disable_optimization_reason(kOptimizationDisabled);
+  function->shared()->set_disable_optimization_reason(
+      kOptimizationDisabledForTest);
   function->shared()->set_optimization_disabled(true);
   return isolate->heap()->undefined_value();
 }
@@ -232,7 +267,7 @@ RUNTIME_FUNCTION(Runtime_ClearFunctionTypeFeedback) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
-  function->shared()->ClearTypeFeedbackInfo();
+  function->ClearTypeFeedbackInfo();
   Code* unoptimized = function->shared()->code();
   if (unoptimized->kind() == Code::FUNCTION) {
     unoptimized->ClearInlineCaches();
@@ -342,7 +377,7 @@ RUNTIME_FUNCTION(Runtime_SetFlags) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_CHECKED(String, arg, 0);
-  SmartArrayPointer<char> flags =
+  base::SmartArrayPointer<char> flags =
       arg->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   FlagList::SetFlagsFromString(flags.get(), StrLength(flags.get()));
   return isolate->heap()->undefined_value();
@@ -377,8 +412,7 @@ RUNTIME_FUNCTION(Runtime_AbortJS) {
 
 RUNTIME_FUNCTION(Runtime_NativeScriptsCount) {
   DCHECK(args.length() == 0);
-  return Smi::FromInt(Natives::GetBuiltinsCount() +
-                      ExtraNatives::GetBuiltinsCount());
+  return Smi::FromInt(Natives::GetBuiltinsCount());
 }
 
 
@@ -399,7 +433,7 @@ RUNTIME_FUNCTION(Runtime_DisassembleFunction) {
   DCHECK(args.length() == 1);
   // Get the function and make sure it is compiled.
   CONVERT_ARG_HANDLE_CHECKED(JSFunction, func, 0);
-  if (!Compiler::EnsureCompiled(func, KEEP_EXCEPTION)) {
+  if (!Compiler::Compile(func, Compiler::KEEP_EXCEPTION)) {
     return isolate->heap()->exception();
   }
   OFStream os(stdout);
@@ -409,53 +443,79 @@ RUNTIME_FUNCTION(Runtime_DisassembleFunction) {
   return isolate->heap()->undefined_value();
 }
 
+namespace {
 
-static int StackSize(Isolate* isolate) {
+int StackSize(Isolate* isolate) {
   int n = 0;
   for (JavaScriptFrameIterator it(isolate); !it.done(); it.Advance()) n++;
   return n;
 }
 
-
-static void PrintTransition(Isolate* isolate, Object* result) {
-  // indentation
-  {
-    const int nmax = 80;
-    int n = StackSize(isolate);
-    if (n <= nmax)
-      PrintF("%4d:%*s", n, n, "");
-    else
-      PrintF("%4d:%*s", n, nmax, "...");
-  }
-
-  if (result == NULL) {
-    JavaScriptFrame::PrintTop(isolate, stdout, true, false);
-    PrintF(" {\n");
+void PrintIndentation(Isolate* isolate) {
+  const int nmax = 80;
+  int n = StackSize(isolate);
+  if (n <= nmax) {
+    PrintF("%4d:%*s", n, n, "");
   } else {
-    // function result
-    PrintF("} -> ");
-    result->ShortPrint();
-    PrintF("\n");
+    PrintF("%4d:%*s", n, nmax, "...");
   }
 }
 
+}  // namespace
 
 RUNTIME_FUNCTION(Runtime_TraceEnter) {
   SealHandleScope shs(isolate);
-  DCHECK(args.length() == 0);
-  PrintTransition(isolate, NULL);
+  DCHECK_EQ(0, args.length());
+  PrintIndentation(isolate);
+  JavaScriptFrame::PrintTop(isolate, stdout, true, false);
+  PrintF(" {\n");
   return isolate->heap()->undefined_value();
 }
 
 
 RUNTIME_FUNCTION(Runtime_TraceExit) {
   SealHandleScope shs(isolate);
-  DCHECK(args.length() == 1);
+  DCHECK_EQ(1, args.length());
   CONVERT_ARG_CHECKED(Object, obj, 0);
-  PrintTransition(isolate, obj);
+  PrintIndentation(isolate);
+  PrintF("} -> ");
+  obj->ShortPrint();
+  PrintF("\n");
   return obj;  // return TOS
 }
 
+RUNTIME_FUNCTION(Runtime_TraceTailCall) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(0, args.length());
+  PrintIndentation(isolate);
+  PrintF("} -> tail call ->\n");
+  return isolate->heap()->undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_GetExceptionDetails) {
+  HandleScope shs(isolate);
+  DCHECK(args.length() == 1);
+  CONVERT_ARG_HANDLE_CHECKED(JSObject, exception_obj, 0);
+
+  Factory* factory = isolate->factory();
+  Handle<JSMessageObject> message_obj =
+      isolate->CreateMessage(exception_obj, nullptr);
+
+  Handle<JSObject> message = factory->NewJSObject(isolate->object_function());
+
+  Handle<String> key;
+  Handle<Object> value;
+
+  key = factory->NewStringFromAsciiChecked("start_pos");
+  value = handle(Smi::FromInt(message_obj->start_position()), isolate);
+  JSObject::SetProperty(message, key, value, STRICT).Assert();
+
+  key = factory->NewStringFromAsciiChecked("end_pos");
+  value = handle(Smi::FromInt(message_obj->end_position()), isolate);
+  JSObject::SetProperty(message, key, value, STRICT).Assert();
+
+  return *message;
+}
 
 RUNTIME_FUNCTION(Runtime_HaveSameMap) {
   SealHandleScope shs(isolate);
@@ -463,6 +523,14 @@ RUNTIME_FUNCTION(Runtime_HaveSameMap) {
   CONVERT_ARG_CHECKED(JSObject, obj1, 0);
   CONVERT_ARG_CHECKED(JSObject, obj2, 1);
   return isolate->heap()->ToBoolean(obj1->map() == obj2->map());
+}
+
+
+RUNTIME_FUNCTION(Runtime_InNewSpace) {
+  SealHandleScope shs(isolate);
+  DCHECK(args.length() == 1);
+  CONVERT_ARG_CHECKED(Object, obj, 0);
+  return isolate->heap()->ToBoolean(isolate->heap()->InNewSpace(obj));
 }
 
 
@@ -479,22 +547,11 @@ ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(FastDoubleElements)
 ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(FastHoleyElements)
 ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(DictionaryElements)
 ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(SloppyArgumentsElements)
-ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(ExternalArrayElements)
+ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(FixedTypedArrayElements)
 // Properties test sitting with elements tests - not fooling anyone.
 ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION(FastProperties)
 
 #undef ELEMENTS_KIND_CHECK_RUNTIME_FUNCTION
-
-
-#define TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION(Type, type, TYPE, ctype, size) \
-  RUNTIME_FUNCTION(Runtime_HasExternal##Type##Elements) {                  \
-    CONVERT_ARG_CHECKED(JSObject, obj, 0);                                 \
-    return isolate->heap()->ToBoolean(obj->HasExternal##Type##Elements()); \
-  }
-
-TYPED_ARRAYS(TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION)
-
-#undef TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION
 
 
 #define FIXED_TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION(Type, type, TYPE, ctype, s) \
@@ -506,5 +563,14 @@ TYPED_ARRAYS(TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION)
 TYPED_ARRAYS(FIXED_TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION)
 
 #undef FIXED_TYPED_ARRAYS_CHECK_RUNTIME_FUNCTION
+
+
+RUNTIME_FUNCTION(Runtime_SpeciesProtector) {
+  SealHandleScope shs(isolate);
+  DCHECK_EQ(0, args.length());
+  return isolate->heap()->ToBoolean(isolate->IsArraySpeciesLookupChainIntact());
+}
+
+
 }  // namespace internal
 }  // namespace v8

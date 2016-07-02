@@ -8,6 +8,8 @@
 
 #include "src/base/bits.h"
 #include "src/compiler/node.h"
+#include "src/compiler/node-properties.h"
+#include "src/compiler/verifier.h"
 
 namespace v8 {
 namespace internal {
@@ -23,7 +25,7 @@ Graph::Graph(Zone* zone)
 
 
 void Graph::Decorate(Node* node) {
-  for (auto const decorator : decorators_) {
+  for (GraphDecorator* const decorator : decorators_) {
     decorator->Decorate(node);
   }
 }
@@ -40,10 +42,15 @@ void Graph::RemoveDecorator(GraphDecorator* decorator) {
   decorators_.erase(it);
 }
 
-
-Node* Graph::NewNode(const Operator* op, int input_count, Node** inputs,
+Node* Graph::NewNode(const Operator* op, int input_count, Node* const* inputs,
                      bool incomplete) {
-  DCHECK_LE(op->ValueInputCount(), input_count);
+  Node* node = NewNodeUnchecked(op, input_count, inputs, incomplete);
+  Verifier::VerifyNode(node);
+  return node;
+}
+
+Node* Graph::NewNodeUnchecked(const Operator* op, int input_count,
+                              Node* const* inputs, bool incomplete) {
   Node* const node =
       Node::New(zone(), NextNodeId(), op, input_count, inputs, incomplete);
   Decorate(node);

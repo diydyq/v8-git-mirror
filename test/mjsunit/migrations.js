@@ -274,10 +274,6 @@ var migrations = [
     },
   },
   {
-    name: "observe",
-    migr: function(o, i) { Object.observe(o, function(){}); },
-  },
-  {
     name: "seal",
     migr: function(o, i) { Object.seal(o); },
   },

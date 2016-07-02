@@ -12,7 +12,7 @@ var done, stepCount;
 function listener(event, execState, eventData, data) {
   if (event == Debug.DebugEvent.Break) {
     if (!done) {
-      execState.prepareStep(Debug.StepAction.StepInto);
+      execState.prepareStep(Debug.StepAction.StepIn);
       var s = execState.frame().sourceLineText();
       assertTrue(s.indexOf('// ' + stepCount + '.') !== -1);
       stepCount++;
@@ -24,10 +24,10 @@ Debug.setListener(listener);
 
 
 class Base {
-  constructor() {
-    var x = 1;   // 1.
-    var y = 2;   // 2.
-    done = true; // 3.
+  constructor() { // 1.
+    var x = 1;    // 2.
+    var y = 2;    // 3.
+    done = true;  // 4.
   }
 }
 
@@ -40,7 +40,7 @@ class Derived extends Base {}
   var bp = Debug.setBreakPoint(Base, 0);
 
   new Base();
-  assertEquals(4, stepCount);
+  assertEquals(1, stepCount);
 
   Debug.clearBreakPoint(bp);
 })();
@@ -52,7 +52,7 @@ class Derived extends Base {}
 
   var bp = Debug.setBreakPoint(Base, 0);
   new Derived();
-  assertEquals(4, stepCount);
+  assertEquals(1, stepCount);
 
   Debug.clearBreakPoint(bp);
 })();
@@ -68,7 +68,7 @@ class Derived extends Base {}
 
   var bp = Debug.setBreakPoint(f, 0);
   f();
-  assertEquals(4, stepCount);
+  assertEquals(1, stepCount);
 
   Debug.clearBreakPoint(bp);
 })();
@@ -86,7 +86,7 @@ class Derived extends Base {}
 
   var bp = Debug.setBreakPoint(f, 0);
   f();
-  assertEquals(4, stepCount);
+  assertEquals(1, stepCount);
 
   Debug.clearBreakPoint(bp);
 })();
@@ -104,7 +104,7 @@ class Derived extends Base {}
 
   var bp = Debug.setBreakPoint(f, 0);
   f();
-  assertEquals(4, stepCount);
+  assertEquals(1, stepCount);
 
   Debug.clearBreakPoint(bp);
 })();

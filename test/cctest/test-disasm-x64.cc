@@ -29,10 +29,10 @@
 
 #include "src/v8.h"
 
-#include "src/debug.h"
+#include "src/code-factory.h"
+#include "src/debug/debug.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
-#include "src/ic/ic.h"
 #include "src/macro-assembler.h"
 #include "test/cctest/cctest.h"
 
@@ -282,7 +282,7 @@ TEST(DisasmX64) {
   // TODO(mstarzinger): The following is protected.
   // __ call(Operand(rbx, rcx, times_4, 10000));
   __ nop();
-  Handle<Code> ic(LoadIC::initialize_stub(isolate, NOT_CONTEXTUAL));
+  Handle<Code> ic(CodeFactory::LoadIC(isolate).code());
   __ call(ic, RelocInfo::CODE_TARGET);
   __ nop();
   __ nop();
@@ -458,6 +458,7 @@ TEST(DisasmX64) {
     __ pcmpeqd(xmm1, xmm0);
 
     __ punpckldq(xmm1, xmm11);
+    __ punpckldq(xmm5, Operand(rdx, 4));
     __ punpckhdq(xmm8, xmm15);
   }
 
@@ -484,11 +485,46 @@ TEST(DisasmX64) {
   {
     if (CpuFeatures::IsSupported(SSE4_1)) {
       CpuFeatureScope scope(&assm, SSE4_1);
+      __ insertps(xmm5, xmm1, 123);
       __ extractps(rax, xmm1, 0);
       __ pextrd(rbx, xmm15, 0);
       __ pextrd(r12, xmm0, 1);
       __ pinsrd(xmm9, r9, 0);
-      __ pinsrd(xmm5, rax, 1);
+      __ pinsrd(xmm5, Operand(rax, 4), 1);
+
+      __ cmpps(xmm5, xmm1, 1);
+      __ cmpeqps(xmm5, xmm1);
+      __ cmpltps(xmm5, xmm1);
+      __ cmpleps(xmm5, xmm1);
+      __ cmpneqps(xmm5, xmm1);
+      __ cmpnltps(xmm5, xmm1);
+      __ cmpnleps(xmm5, xmm1);
+
+      __ minps(xmm5, xmm1);
+      __ minps(xmm5, Operand(rdx, 4));
+      __ maxps(xmm5, xmm1);
+      __ maxps(xmm5, Operand(rdx, 4));
+      __ rcpps(xmm5, xmm1);
+      __ rcpps(xmm5, Operand(rdx, 4));
+      __ sqrtps(xmm5, xmm1);
+      __ sqrtps(xmm5, Operand(rdx, 4));
+      __ movups(xmm5, xmm1);
+      __ movups(xmm5, Operand(rdx, 4));
+      __ movups(Operand(rdx, 4), xmm5);
+      __ paddd(xmm5, xmm1);
+      __ paddd(xmm5, Operand(rdx, 4));
+      __ psubd(xmm5, xmm1);
+      __ psubd(xmm5, Operand(rdx, 4));
+      __ pmulld(xmm5, xmm1);
+      __ pmulld(xmm5, Operand(rdx, 4));
+      __ pmuludq(xmm5, xmm1);
+      __ pmuludq(xmm5, Operand(rdx, 4));
+      __ psrldq(xmm5, 123);
+      __ pshufd(xmm5, xmm1, 3);
+      __ cvtps2dq(xmm5, xmm1);
+      __ cvtps2dq(xmm5, Operand(rdx, 4));
+      __ cvtdq2ps(xmm5, xmm1);
+      __ cvtdq2ps(xmm5, Operand(rdx, 4));
     }
   }
 
@@ -496,6 +532,10 @@ TEST(DisasmX64) {
   {
     if (CpuFeatures::IsSupported(AVX)) {
       CpuFeatureScope scope(&assm, AVX);
+      __ vmovss(xmm6, xmm14, xmm2);
+      __ vmovss(xmm9, Operand(rbx, rcx, times_4, 10000));
+      __ vmovss(Operand(rbx, rcx, times_4, 10000), xmm0);
+
       __ vaddss(xmm0, xmm1, xmm2);
       __ vaddss(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
       __ vmulss(xmm0, xmm1, xmm2);
@@ -508,8 +548,21 @@ TEST(DisasmX64) {
       __ vminss(xmm9, xmm1, Operand(rbx, rcx, times_8, 10000));
       __ vmaxss(xmm8, xmm1, xmm2);
       __ vmaxss(xmm9, xmm1, Operand(rbx, rcx, times_1, 10000));
+      __ vmovss(xmm9, Operand(r11, rcx, times_8, -10000));
+      __ vmovss(Operand(rbx, r9, times_4, 10000), xmm1);
       __ vucomiss(xmm9, xmm1);
       __ vucomiss(xmm8, Operand(rbx, rdx, times_2, 10981));
+
+      __ vmovd(xmm5, rdi);
+      __ vmovd(xmm9, Operand(rbx, rcx, times_4, 10000));
+      __ vmovd(r9, xmm6);
+      __ vmovq(xmm5, rdi);
+      __ vmovq(xmm9, Operand(rbx, rcx, times_4, 10000));
+      __ vmovq(r9, xmm6);
+
+      __ vmovsd(xmm6, xmm14, xmm2);
+      __ vmovsd(xmm9, Operand(rbx, rcx, times_4, 10000));
+      __ vmovsd(Operand(rbx, rcx, times_4, 10000), xmm0);
 
       __ vaddsd(xmm0, xmm1, xmm2);
       __ vaddsd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
@@ -523,8 +576,28 @@ TEST(DisasmX64) {
       __ vminsd(xmm9, xmm1, Operand(rbx, rcx, times_8, 10000));
       __ vmaxsd(xmm8, xmm1, xmm2);
       __ vmaxsd(xmm9, xmm1, Operand(rbx, rcx, times_1, 10000));
+      __ vroundsd(xmm8, xmm3, xmm0, kRoundDown);
+      __ vsqrtsd(xmm8, xmm1, xmm2);
+      __ vsqrtsd(xmm9, xmm1, Operand(rbx, rcx, times_1, 10000));
       __ vucomisd(xmm9, xmm1);
       __ vucomisd(xmm8, Operand(rbx, rdx, times_2, 10981));
+
+      __ vcvtss2sd(xmm4, xmm9, xmm11);
+      __ vcvtsd2ss(xmm9, xmm3, xmm2);
+      __ vcvtss2sd(xmm4, xmm9, Operand(rbx, rcx, times_1, 10000));
+      __ vcvtsd2ss(xmm9, xmm3, Operand(rbx, rcx, times_1, 10000));
+      __ vcvtlsi2sd(xmm5, xmm9, rcx);
+      __ vcvtlsi2sd(xmm9, xmm3, Operand(rbx, r9, times_4, 10000));
+      __ vcvtqsi2sd(xmm5, xmm9, r11);
+      __ vcvttsd2si(r9, xmm6);
+      __ vcvttsd2si(rax, Operand(rbx, r9, times_4, 10000));
+      __ vcvttsd2siq(rdi, xmm9);
+      __ vcvttsd2siq(r8, Operand(r9, rbx, times_4, 10000));
+      __ vcvtsd2si(rdi, xmm9);
+
+      __ vmovaps(xmm10, xmm11);
+      __ vmovapd(xmm7, xmm0);
+      __ vmovmskpd(r9, xmm4);
 
       __ vandps(xmm0, xmm9, xmm2);
       __ vandps(xmm9, xmm1, Operand(rbx, rcx, times_4, 10000));
@@ -533,8 +606,15 @@ TEST(DisasmX64) {
 
       __ vandpd(xmm0, xmm9, xmm2);
       __ vandpd(xmm9, xmm1, Operand(rbx, rcx, times_4, 10000));
+      __ vorpd(xmm0, xmm1, xmm9);
+      __ vorpd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
       __ vxorpd(xmm0, xmm1, xmm9);
       __ vxorpd(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
+
+      __ vpcmpeqd(xmm0, xmm15, xmm5);
+      __ vpcmpeqd(xmm15, xmm0, Operand(rbx, rcx, times_4, 10000));
+      __ vpsllq(xmm0, xmm15, 21);
+      __ vpsrlq(xmm15, xmm0, 21);
     }
   }
 
@@ -701,10 +781,29 @@ TEST(DisasmX64) {
 
   // xchg.
   {
+    __ xchgb(rax, Operand(rax, 8));
+    __ xchgw(rax, Operand(rbx, 8));
     __ xchgq(rax, rax);
     __ xchgq(rax, rbx);
     __ xchgq(rbx, rbx);
     __ xchgq(rbx, Operand(rsp, 12));
+  }
+
+  // cmpxchg.
+  {
+    __ cmpxchgb(Operand(rsp, 12), rax);
+    __ cmpxchgw(Operand(rbx, rcx, times_4, 10000), rax);
+    __ cmpxchgl(Operand(rbx, rcx, times_4, 10000), rax);
+    __ cmpxchgq(Operand(rbx, rcx, times_4, 10000), rax);
+  }
+
+  // lock prefix.
+  {
+    __ lock();
+    __ cmpxchgl(Operand(rsp, 12), rbx);
+
+    __ lock();
+    __ xchgw(rax, Operand(rcx, 8));
   }
 
   // Nop instructions

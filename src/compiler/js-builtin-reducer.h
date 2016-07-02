@@ -6,16 +6,19 @@
 #define V8_COMPILER_JS_BUILTIN_REDUCER_H_
 
 #include "src/compiler/graph-reducer.h"
-#include "src/compiler/simplified-operator.h"
 
 namespace v8 {
 namespace internal {
+
+// Forward declarations.
+class TypeCache;
+
 namespace compiler {
 
 // Forward declarations.
 class CommonOperatorBuilder;
 class JSGraph;
-class MachineOperatorBuilder;
+class SimplifiedOperatorBuilder;
 
 
 class JSBuiltinReducer final : public AdvancedReducer {
@@ -26,18 +29,52 @@ class JSBuiltinReducer final : public AdvancedReducer {
   Reduction Reduce(Node* node) final;
 
  private:
-  Reduction ReduceMathMax(Node* node);
-  Reduction ReduceMathImul(Node* node);
+  Reduction ReduceMathAbs(Node* node);
+  Reduction ReduceMathAcos(Node* node);
+  Reduction ReduceMathAcosh(Node* node);
+  Reduction ReduceMathAsin(Node* node);
+  Reduction ReduceMathAsinh(Node* node);
+  Reduction ReduceMathAtan(Node* node);
+  Reduction ReduceMathAtanh(Node* node);
+  Reduction ReduceMathAtan2(Node* node);
+  Reduction ReduceMathCbrt(Node* node);
+  Reduction ReduceMathCeil(Node* node);
+  Reduction ReduceMathClz32(Node* node);
+  Reduction ReduceMathCos(Node* node);
+  Reduction ReduceMathCosh(Node* node);
+  Reduction ReduceMathExp(Node* node);
+  Reduction ReduceMathExpm1(Node* node);
+  Reduction ReduceMathFloor(Node* node);
   Reduction ReduceMathFround(Node* node);
+  Reduction ReduceMathImul(Node* node);
+  Reduction ReduceMathLog(Node* node);
+  Reduction ReduceMathLog1p(Node* node);
+  Reduction ReduceMathLog10(Node* node);
+  Reduction ReduceMathLog2(Node* node);
+  Reduction ReduceMathMax(Node* node);
+  Reduction ReduceMathMin(Node* node);
+  Reduction ReduceMathPow(Node* node);
+  Reduction ReduceMathRound(Node* node);
+  Reduction ReduceMathSign(Node* node);
+  Reduction ReduceMathSin(Node* node);
+  Reduction ReduceMathSinh(Node* node);
+  Reduction ReduceMathSqrt(Node* node);
+  Reduction ReduceMathTan(Node* node);
+  Reduction ReduceMathTanh(Node* node);
+  Reduction ReduceMathTrunc(Node* node);
+  Reduction ReduceStringFromCharCode(Node* node);
 
-  JSGraph* jsgraph() const { return jsgraph_; }
+  Node* ToNumber(Node* value);
+  Node* ToUint32(Node* value);
+
   Graph* graph() const;
+  JSGraph* jsgraph() const { return jsgraph_; }
+  Isolate* isolate() const;
   CommonOperatorBuilder* common() const;
-  MachineOperatorBuilder* machine() const;
-  SimplifiedOperatorBuilder* simplified() { return &simplified_; }
+  SimplifiedOperatorBuilder* simplified() const;
 
-  JSGraph* jsgraph_;
-  SimplifiedOperatorBuilder simplified_;
+  JSGraph* const jsgraph_;
+  TypeCache const& type_cache_;
 };
 
 }  // namespace compiler

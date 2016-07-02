@@ -19,22 +19,15 @@ namespace compiler {
 
 namespace {
 
-enum class Decision { kUnknown, kTrue, kFalse };
-
 Decision DecideCondition(Node* const cond) {
   switch (cond->opcode()) {
     case IrOpcode::kInt32Constant: {
       Int32Matcher mcond(cond);
       return mcond.Value() ? Decision::kTrue : Decision::kFalse;
     }
-    case IrOpcode::kInt64Constant: {
-      Int64Matcher mcond(cond);
-      return mcond.Value() ? Decision::kTrue : Decision::kFalse;
-    }
     case IrOpcode::kHeapConstant: {
       HeapObjectMatcher mcond(cond);
-      return mcond.Value().handle()->BooleanValue() ? Decision::kTrue
-                                                    : Decision::kFalse;
+      return mcond.Value()->BooleanValue() ? Decision::kTrue : Decision::kFalse;
     }
     default:
       return Decision::kUnknown;
@@ -58,6 +51,9 @@ Reduction CommonOperatorReducer::Reduce(Node* node) {
   switch (node->opcode()) {
     case IrOpcode::kBranch:
       return ReduceBranch(node);
+    case IrOpcode::kDeoptimizeIf:
+    case IrOpcode::kDeoptimizeUnless:
+      return ReduceDeoptimizeConditional(node);
     case IrOpcode::kMerge:
       return ReduceMerge(node);
     case IrOpcode::kEffectPhi:
@@ -86,10 +82,10 @@ Reduction CommonOperatorReducer::ReduceBranch(Node* node) {
     for (Node* const use : node->uses()) {
       switch (use->opcode()) {
         case IrOpcode::kIfTrue:
-          use->set_op(common()->IfFalse());
+          NodeProperties::ChangeOp(use, common()->IfFalse());
           break;
         case IrOpcode::kIfFalse:
-          use->set_op(common()->IfTrue());
+          NodeProperties::ChangeOp(use, common()->IfTrue());
           break;
         default:
           UNREACHABLE();
@@ -100,7 +96,8 @@ Reduction CommonOperatorReducer::ReduceBranch(Node* node) {
     // graph reduction logic will ensure that the uses are revisited properly.
     node->ReplaceInput(0, cond->InputAt(0));
     // Negate the hint for {branch}.
-    node->set_op(common()->Branch(NegateBranchHint(BranchHintOf(node->op()))));
+    NodeProperties::ChangeOp(
+        node, common()->Branch(NegateBranchHint(BranchHintOf(node->op()))));
     return Changed(node);
   }
   Decision const decision = DecideCondition(cond);
@@ -121,6 +118,38 @@ Reduction CommonOperatorReducer::ReduceBranch(Node* node) {
   return Replace(dead());
 }
 
+Reduction CommonOperatorReducer::ReduceDeoptimizeConditional(Node* node) {
+  DCHECK(node->opcode() == IrOpcode::kDeoptimizeIf ||
+         node->opcode() == IrOpcode::kDeoptimizeUnless);
+  bool condition_is_true = node->opcode() == IrOpcode::kDeoptimizeUnless;
+  Node* condition = NodeProperties::GetValueInput(node, 0);
+  Node* frame_state = NodeProperties::GetValueInput(node, 1);
+  Node* effect = NodeProperties::GetEffectInput(node);
+  Node* control = NodeProperties::GetControlInput(node);
+  // Swap DeoptimizeIf/DeoptimizeUnless on {node} if {cond} is a BooleaNot
+  // and use the input to BooleanNot as new condition for {node}.  Note we
+  // assume that {cond} was already properly optimized before we get here
+  // (as guaranteed by the graph reduction logic).
+  if (condition->opcode() == IrOpcode::kBooleanNot) {
+    NodeProperties::ReplaceValueInput(node, condition->InputAt(0), 0);
+    NodeProperties::ChangeOp(node, condition_is_true
+                                       ? common()->DeoptimizeIf()
+                                       : common()->DeoptimizeUnless());
+    return Changed(node);
+  }
+  Decision const decision = DecideCondition(condition);
+  if (decision == Decision::kUnknown) return NoChange();
+  if (condition_is_true == (decision == Decision::kTrue)) {
+    ReplaceWithValue(node, dead(), effect, control);
+  } else {
+    control = graph()->NewNode(common()->Deoptimize(DeoptimizeKind::kEager),
+                               frame_state, effect, control);
+    // TODO(bmeurer): This should be on the AdvancedReducer somehow.
+    NodeProperties::MergeControlToEnd(graph(), common(), control);
+    Revisit(graph()->end());
+  }
+  return Replace(dead());
+}
 
 Reduction CommonOperatorReducer::ReduceMerge(Node* node) {
   DCHECK_EQ(IrOpcode::kMerge, node->opcode());
@@ -149,8 +178,8 @@ Reduction CommonOperatorReducer::ReduceMerge(Node* node) {
       DCHECK(branch->OwnedBy(if_true, if_false));
       Node* const control = branch->InputAt(1);
       // Mark the {branch} as {Dead}.
-      branch->set_op(common()->Dead());
       branch->TrimInputCount(0);
+      NodeProperties::ChangeOp(branch, common()->Dead());
       return Replace(control);
     }
   }
@@ -202,6 +231,8 @@ Reduction CommonOperatorReducer::ReducePhi(Node* node) {
         if_false->opcode() == IrOpcode::kIfFalse &&
         if_true->InputAt(0) == if_false->InputAt(0)) {
       Node* const branch = if_true->InputAt(0);
+      // Check that the branch is not dead already.
+      if (branch->opcode() != IrOpcode::kBranch) return NoChange();
       Node* const cond = branch->InputAt(0);
       if (cond->opcode() == IrOpcode::kFloat32LessThan) {
         Float32BinopMatcher mcond(cond);
@@ -281,9 +312,8 @@ Reduction CommonOperatorReducer::ReduceReturn(Node* node) {
     DCHECK_NE(0, control_input_count);
     DCHECK_EQ(control_input_count, value->InputCount() - 1);
     DCHECK_EQ(control_input_count, effect->InputCount() - 1);
-    Node* const end = graph()->end();
-    DCHECK_EQ(IrOpcode::kEnd, end->opcode());
-    DCHECK_NE(0, end->InputCount());
+    DCHECK_EQ(IrOpcode::kEnd, graph()->end()->opcode());
+    DCHECK_NE(0, graph()->end()->InputCount());
     for (int i = 0; i < control_input_count; ++i) {
       // Create a new {Return} and connect it to {end}. We don't need to mark
       // {end} as revisit, because we mark {node} as {Dead} below, which was
@@ -291,8 +321,7 @@ Reduction CommonOperatorReducer::ReduceReturn(Node* node) {
       // the reducer logic will visit {end} again.
       Node* ret = graph()->NewNode(common()->Return(), value->InputAt(i),
                                    effect->InputAt(i), control->InputAt(i));
-      end->set_op(common()->End(end->InputCount() + 1));
-      end->AppendInput(graph()->zone(), ret);
+      NodeProperties::MergeControlToEnd(graph(), common(), ret);
     }
     // Mark the merge {control} and return {node} as {dead}.
     Replace(control, dead());
@@ -362,19 +391,19 @@ Reduction CommonOperatorReducer::ReduceSelect(Node* node) {
 
 Reduction CommonOperatorReducer::Change(Node* node, Operator const* op,
                                         Node* a) {
-  node->set_op(op);
   node->ReplaceInput(0, a);
   node->TrimInputCount(1);
+  NodeProperties::ChangeOp(node, op);
   return Changed(node);
 }
 
 
 Reduction CommonOperatorReducer::Change(Node* node, Operator const* op, Node* a,
                                         Node* b) {
-  node->set_op(op);
   node->ReplaceInput(0, a);
   node->ReplaceInput(1, b);
   node->TrimInputCount(2);
+  NodeProperties::ChangeOp(node, op);
   return Changed(node);
 }
 

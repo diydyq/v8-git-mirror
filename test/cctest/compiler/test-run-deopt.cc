@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
+#include "src/frames-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/function-tester.h"
 
-using namespace v8::internal;
-using namespace v8::internal::compiler;
-
-#if V8_TURBOFAN_TARGET
+namespace v8 {
+namespace internal {
+namespace compiler {
 
 static void IsOptimized(const v8::FunctionCallbackInfo<v8::Value>& args) {
   JavaScriptFrameIterator it(CcTest::i_isolate());
@@ -23,7 +21,10 @@ static void InstallIsOptimizedHelper(v8::Isolate* isolate) {
   v8::Local<v8::Context> context = isolate->GetCurrentContext();
   v8::Local<v8::FunctionTemplate> t =
       v8::FunctionTemplate::New(isolate, IsOptimized);
-  context->Global()->Set(v8_str("IsOptimized"), t->GetFunction());
+  CHECK(context->Global()
+            ->Set(context, v8_str("IsOptimized"),
+                  t->GetFunction(context).ToLocalChecked())
+            .FromJust());
 }
 
 
@@ -64,7 +65,6 @@ TEST(DeoptSimpleInExpr) {
 
 TEST(DeoptExceptionHandlerCatch) {
   FLAG_allow_natives_syntax = true;
-  FLAG_turbo_try_catch = true;
 
   FunctionTester T(
       "(function f() {"
@@ -84,7 +84,6 @@ TEST(DeoptExceptionHandlerCatch) {
 
 TEST(DeoptExceptionHandlerFinally) {
   FLAG_allow_natives_syntax = true;
-  FLAG_turbo_try_finally = true;
 
   FunctionTester T(
       "(function f() {"
@@ -98,12 +97,9 @@ TEST(DeoptExceptionHandlerFinally) {
 
   CompileRun("function DeoptAndThrow(f) { %DeoptimizeFunction(f); throw 0; }");
   InstallIsOptimizedHelper(CcTest::isolate());
-#if 0  // TODO(4195,mstarzinger): Reproduces on MIPS64, re-enable once fixed.
   T.CheckCall(T.false_value());
-#endif
 }
 
-#endif
 
 TEST(DeoptTrivial) {
   FLAG_allow_natives_syntax = true;
@@ -116,3 +112,7 @@ TEST(DeoptTrivial) {
 
   T.CheckCall(T.Val(1));
 }
+
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8
